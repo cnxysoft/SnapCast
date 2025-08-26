@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="debug" type="GoApplicationRunConfiguration" factoryName="Go Application" singleton="false">
+    <module name="SnapCast" />
+    <working_directory value="$PROJECT_DIR$/debug" />
+    <kind value="PACKAGE" />
+    <package value="SnapCast" />
+    <directory value="$PROJECT_DIR$" />
+    <filePath value="$PROJECT_DIR$/main.go" />
+    <output_directory value="$PROJECT_DIR$/debug" />
+    <method v="2" />
+  </configuration>
+</component>
