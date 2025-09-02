@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>转发图文动态</title>
+  <style>
+    
+    body {
+      font-family: "Segoe UI", "PingFang SC", sans-serif;
+      background: #f9f9f9;
+      margin: 0;
+      padding: 20px;
+    }
+    .qr {
+      position: absolute;
+      top: 30px;
+      right: 30px;
+    }
+    .qr img {
+      width: 80px;
+      height: 80px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      padding: 20px;
+      max-width: 800px;
+      margin: auto;
+    }
+    .user {
+      display: flex;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .user img {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      margin-right: 10px;
+    }
+    .desc {
+      margin-top: 6px;
+      color: #333;
+      font-size: 14px;
+      white-space: pre-wrap;
+    }
+    .origin {
+      background: #f0f0f0;
+      border-radius: 8px;
+      padding: 10px;
+      margin-top: 10px;
+    }
+    .origin-user {
+      display: flex;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .origin-user img {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      margin-right: 8px;
+    }
+    .image-grid {
+      column-count: 3;
+      column-gap: 12px;
+    }
+    .image-grid img {
+      width: 100%;
+      margin-bottom: 12px;
+      border-radius: 6px;
+      break-inside: avoid;
+      object-fit: contain;
+    }
+    .footer {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #888;
+    }
+    @media (max-width: 600px) {
+      .image-grid {
+        column-count: 2;
+      }
+    }
+    @media (max-width: 400px) {
+      .image-grid {
+        column-count: 1;
+      }
+    }
+  </style>
+</head>
+<body>
+<div class="card">
+  <div class="qr">
+    <img src="https://api.qrserver.com/v1/create-qr-code/?size=100x100&data={{.dynamic_url}}" alt="二维码">
+  </div>
+  <div class="user">
+    <img src="{{.user.face}}" alt="头像">
+    <strong>{{.user.name}}</strong>
+  </div>
+  <div class="desc">{{.content}}</div>
+
+  <div class="origin">
+    <div class="origin-user">
+      <img src="{{.origin_user.face}}" alt="原作者头像">
+      <span>{{.origin_user.name}}</span>
+    </div>
+    <div class="desc">{{.image.description}}</div>
+    <div class="image-grid">
+      {{range .image.image_urls}}
+      <img src="{{.}}" alt="图文">
+      {{end}}
+    </div>
+  </div>
+
+  <div class="footer">
+    发布于 {{.date}} · <a href="{{.dynamic_url}}" target="_blank">查看原动态</a>
+  </div>
+</div>
+</body>
+</html>

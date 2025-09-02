@@ -3,8 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"github.com/chromedp/chromedp"
-	"github.com/fsnotify/fsnotify"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
 	"go.uber.org/atomic"
@@ -14,49 +14,26 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
+	"runtime"
+	"time"
 )
 
 // ====== 数据结构 ======
 
 type PushPayload struct {
-	Site    string       `json:"site"`
-	Dynamic *DynamicInfo `json:"dynamic,omitempty"`
-	Live    *LiveInfo    `json:"live,omitempty"`
+	Site string      `json:"site"`
+	Type string      `json:"type"`
+	Data interface{} `json:"data"`
 }
-
-type DynamicInfo struct {
-	Type       int    `json:"type"`
-	Id         string `json:"id"`
-	Title      string `json:"title"`
-	DynamicUrl string `json:"dynamic_url"`
-	User       struct {
-		Uid  int64  `json:"uid"`
-		Name string `json:"name"`
-		Face string `json:"face"`
-	} `json:"user"`
-}
-
-type LiveInfo struct {
-	UserInfo
-	Status    int    `json:"status"`
-	LiveTitle string `json:"live_title"`
-	Cover     string `json:"cover"`
-}
-
-type UserInfo struct {
-	Uid  int64  `json:"uid"`
-	Name string `json:"name"`
-	Face string `json:"face"`
-}
-
-var templateMap = make(map[string]string)
 
 var (
+	templateMap       = make(map[string]string)
 	logger            *zap.Logger
 	logLevel          = zap.NewAtomicLevelAt(parseLogLevel(viper.GetString("logging.level")))
 	globalAuthToken   atomic.String
 	globalBrowserPath atomic.String
+	renderTimeout     atomic.Int64
+	renderQuality     atomic.Int32
 )
 
 // ====== 主程序 ======
@@ -67,35 +44,23 @@ func main() {
 	WatchConfigChanges()
 
 	templateDir := viper.GetString("template.dir")
-	loadTemplates(templateDir)
+	err := loadTemplates(templateDir)
+	if err != nil {
+		logger.Fatal(fmt.Sprintf("❌ 加载模板失败: %v", err))
+		return
+	}
 	if viper.GetBool("template.watch") {
 		watchTemplateDir(templateDir)
 	}
 
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
+	r.Use(AuthMiddleware())
 	r.POST(viper.GetString("server.endpoint"), RenderHandler)
-	r.Run(viper.GetString("server.host") + ":" + viper.GetString("server.port"))
-}
-
-func InitLogger() {
-	cfg := zap.Config{
-		Level:            logLevel,
-		Development:      false,
-		Encoding:         "console",
-		OutputPaths:      []string{"stdout"},
-		ErrorOutputPaths: []string{"stderr"},
-		EncoderConfig: zapcore.EncoderConfig{
-			TimeKey:     "time",
-			LevelKey:    "level",
-			MessageKey:  "msg",
-			EncodeLevel: zapcore.CapitalColorLevelEncoder,
-			EncodeTime:  zapcore.ISO8601TimeEncoder,
-		},
-	}
-	var err error
-	logger, err = cfg.Build()
+	err = r.Run(viper.GetString("server.host") + ":" + viper.GetString("server.port"))
 	if err != nil {
-		panic(err)
+		logger.Fatal(fmt.Sprintf("❌ 服务器启动失败: %v", err))
+		return
 	}
 }
 
@@ -119,10 +84,15 @@ func RenderHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if payload.Dynamic != nil {
-		tmpl.Execute(&buf, payload.Dynamic)
-	} else if payload.Live != nil {
-		tmpl.Execute(&buf, payload.Live)
+	if payload.Data != nil {
+		if logLevel.Level() == zapcore.DebugLevel {
+			debugFields(payload.Data)
+		}
+		err = safeExecuteTemplate(tmpl, payload.Data, &buf)
+		if err != nil {
+			logger.Error(fmt.Sprintf("execute template failed: %v", err))
+			return
+		}
 	}
 
 	// 截图
@@ -136,34 +106,74 @@ func RenderHandler(c *gin.Context) {
 	c.Writer.Write(imgBytes)
 }
 
-func selectTemplate(p PushPayload) string {
-	switch p.Site {
-	case "bilibili":
-		if p.Dynamic != nil {
-			return "templates/bilibili_dynamic.html"
-		}
-		if p.Live != nil {
-			return "templates/bilibili_live.html"
+func resolveBrowserPath() string {
+	if globalBrowserPath.Load() != "" {
+		return globalBrowserPath.Load()
+	}
+
+	switch runtime.GOOS {
+	case "windows":
+		return findWindowsChromeOrEdge()
+	case "linux":
+		return findLinuxChromePath()
+	default:
+		return ""
+	}
+}
+
+func findWindowsChromeOrEdge() string {
+	paths := []string{
+		// Chrome (64-bit)
+		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+		// Chrome (32-bit or fallback)
+		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+		// Chrome (user-level install)
+		filepath.Join(os.Getenv("LOCALAPPDATA"), `Google\Chrome\Application\chrome.exe`),
+
+		// Edge (system-level install, usually here even on x64)
+		`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+		// Edge (64-bit fallback)
+		`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+	}
+
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			logger.Info(fmt.Sprintf("🧭 使用浏览器路径: %v", p))
+			return p
 		}
 	}
+	logger.Warn("⚠️ 未找到浏览器路径，请在配置文件中指定 render.browser_path")
+	return ""
+}
+
+func findLinuxChromePath() string {
+	paths := []string{
+		"/usr/bin/google-chrome",
+		"/usr/bin/chromium-browser",
+		"/usr/bin/chromium",
+		"/snap/bin/chromium",
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			logger.Info(fmt.Sprintf("🧭 使用浏览器路径: %v", p))
+			return p
+		}
+	}
+	logger.Warn("⚠️ 未找到浏览器路径，请在配置文件中指定 render.browser_path")
 	return ""
 }
 
 func RenderScreenshot(html string) ([]byte, error) {
-	// Edge 139 路径（Windows 默认安装路径）
-	edgePath := `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`
+	browserPath := resolveBrowserPath()
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.ExecPath(edgePath),
+		chromedp.ExecPath(browserPath),
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 	)
 
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancel()
-
-	ctx, cancel := chromedp.NewContext(allocCtx)
+	ctx, cancel := NewRenderContext(opts, renderTimeout.Load())
 	defer cancel()
 
 	tmpFile := os.TempDir() + "/render.html"
@@ -174,103 +184,35 @@ func RenderScreenshot(html string) ([]byte, error) {
 	var buf []byte
 	err := chromedp.Run(ctx,
 		chromedp.Navigate("file://"+tmpFile),
-		chromedp.FullScreenshot(&buf, 100),
+		chromedp.FullScreenshot(&buf, int(renderQuality.Load())),
 	)
 	return buf, err
 }
 
-func watchTemplateDir(dir string) {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		logger.Fatal("监听器启动失败", zap.Error(err))
-	}
-	go func() {
-		for {
-			select {
-			case event := <-watcher.Events:
-				if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
-					if strings.HasSuffix(event.Name, ".html") {
-						name := filepath.Base(event.Name)
-						parts := strings.Split(strings.TrimSuffix(name, ".html"), "_")
-						if len(parts) == 2 {
-							key := parts[0] + ":" + parts[1]
-							templateMap[key] = event.Name
-							logger.Info("🆕 模板更新", zap.String("Site", key), zap.String("Type", event.Name))
-						}
-					}
-				}
-			case err = <-watcher.Errors:
-				logger.Error("监听器错误", zap.Error(err))
-			}
+func AuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		expected := globalAuthToken.Load()
+
+		if expected != "" && authHeader != expected {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error": "unauthorized",
+			})
+			return
 		}
-	}()
-	watcher.Add(dir)
-}
-
-func loadTemplates(dir string) error {
-	files, err := os.ReadDir(dir)
-	if err != nil {
-		return err
+		c.Next()
 	}
-
-	for _, f := range files {
-		name := f.Name()
-		if strings.HasSuffix(name, ".html") {
-			parts := strings.Split(strings.TrimSuffix(name, ".html"), "_")
-			if len(parts) == 2 {
-				key := parts[0] + ":" + parts[1] // e.g. bilibili:dynamic
-				templateMap[key] = filepath.Join(dir, name)
-			}
-		}
-	}
-	for k, v := range templateMap {
-		logger.Info("✅ 支持的模板", zap.String("Site:Type", k), zap.String("FileName", v))
-	}
-	return nil
 }
 
-func InitConfig() {
-	viper.SetConfigName("snapcast")
-	viper.SetConfigType("yaml")
-	viper.AddConfigPath(".") // 当前目录
-	err := viper.ReadInConfig()
-	if err != nil {
-		logger.Fatal("❌ 配置文件加载失败", zap.Error(err))
-	}
+func NewRenderContext(opts []chromedp.ExecAllocatorOption, timeoutMs int64) (context.Context, context.CancelFunc) {
+	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
+	ctx, cancel := context.WithTimeout(browserCtx, time.Duration(timeoutMs)*time.Millisecond)
 
-	logger.Info("✅ 配置文件加载成功", zap.String("ConfigFile", viper.ConfigFileUsed()))
-}
-
-func WatchConfigChanges() {
-	viper.WatchConfig()
-	viper.OnConfigChange(func(e fsnotify.Event) {
-		logger.Info("🔄 配置文件变更", zap.String("ConfigFile", e.Name))
-		ApplyDynamicConfig()
-	})
-}
-
-func ApplyDynamicConfig() {
-	newToken := viper.GetString("auth.token")
-	globalAuthToken.Store(newToken)
-
-	newLogLevel := viper.GetString("logging.level")
-	logLevel.SetLevel(parseLogLevel(newLogLevel))
-
-	newBrowserPath := viper.GetString("render.browser_path")
-	globalBrowserPath.Store(newBrowserPath)
-}
-
-func parseLogLevel(level string) zapcore.Level {
-	switch strings.ToLower(level) {
-	case "debug":
-		return zapcore.DebugLevel
-	case "info":
-		return zapcore.InfoLevel
-	case "warn":
-		return zapcore.WarnLevel
-	case "error":
-		return zapcore.ErrorLevel
-	default:
-		return zapcore.InfoLevel
+	// 返回 ctx 和一个组合 cancel（释放所有资源）
+	return ctx, func() {
+		cancel()
+		browserCancel()
+		allocCancel()
 	}
 }

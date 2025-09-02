@@ -2,6 +2,10 @@
   <configuration default="false" name="debug" type="GoApplicationRunConfiguration" factoryName="Go Application" singleton="false">
     <module name="SnapCast" />
     <working_directory value="$PROJECT_DIR$/debug" />
+    <envs>
+      <env name="GOOS" value="windows" />
+      <env name="GOARCH" value="amd64" />
+    </envs>
     <kind value="PACKAGE" />
     <package value="SnapCast" />
     <directory value="$PROJECT_DIR$" />
