@@ -1,0 +1,17 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="linux_amd64" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="SnapCast" />
+    <working_directory value="$PROJECT_DIR$" />
+    <go_parameters value="-o $ProjectFileDir$\dist\SnapCast_linux_amd64 -ldflags=&quot;-s -w&quot; -trimpath" />
+    <envs>
+      <env name="GOOS" value="linux" />
+      <env name="GOARCH" value="amd64" />
+    </envs>
+    <kind value="PACKAGE" />
+    <package value="SnapCast" />
+    <directory value="$PROJECT_DIR$" />
+    <filePath value="$PROJECT_DIR$" />
+    <option name="run" value="false" />
+    <method v="2" />
+  </configuration>
+</component>

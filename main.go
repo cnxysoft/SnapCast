@@ -176,14 +176,18 @@ func RenderScreenshot(html string) ([]byte, error) {
 	ctx, cancel := NewRenderContext(opts, renderTimeout.Load())
 	defer cancel()
 
-	tmpFile := os.TempDir() + "/render.html"
-	if err := os.WriteFile(tmpFile, []byte(html), 0644); err != nil {
-		return nil, err
+	tmpFile := filepath.Join(os.TempDir(), "render.html")
+	os.WriteFile(tmpFile, []byte(html), 0644)
+
+	absPath, _ := filepath.Abs(tmpFile)
+	fileURL := "file://" + absPath
+	if runtime.GOOS != "windows" {
+		fileURL = "file:///" + absPath
 	}
 
 	var buf []byte
 	err := chromedp.Run(ctx,
-		chromedp.Navigate("file://"+tmpFile),
+		chromedp.Navigate(fileURL),
 		chromedp.FullScreenshot(&buf, int(renderQuality.Load())),
 	)
 	return buf, err
