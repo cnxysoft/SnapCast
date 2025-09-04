@@ -1,23 +1,100 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh">
 <head>
-<meta charset="UTF-8">
-<style>
-body { font-family: sans-serif; }
-.card { border: 1px solid #ccc; padding: 16px; width: 400px; }
-.user { display: flex; align-items: center; }
-.user img { border-radius: 50%; width: 40px; height: 40px; margin-right: 8px; }
-.cover { width: 100%; margin-top: 8px; }
-</style>
+  <meta charset="UTF-8">
+  <title>直播推送</title>
+  <style>
+    body {
+      font-family: "Segoe UI", "PingFang SC", sans-serif;
+      background: #f9f9f9;
+      margin: 0;
+      padding: 20px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      padding: 20px;
+      max-width: 600px;
+      margin: auto;
+      position: relative;
+    }
+    .user {
+      display: flex;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .user img {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      margin-right: 12px;
+    }
+    .title {
+      font-size: 16px;
+      font-weight: bold;
+      margin-bottom: 6px;
+      color: #222;
+    }
+    .area {
+      font-size: 13px;
+      color: #666;
+      margin-bottom: 12px;
+    }
+    .cover {
+      width: 100%;
+      border-radius: 8px;
+      object-fit: cover;
+      margin-bottom: 12px;
+    }
+    .status {
+      font-size: 14px;
+      font-weight: bold;
+      color: #e91e63;
+      margin-bottom: 8px;
+    }
+    .qr {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+    }
+    .qr img {
+      width: 80px;
+      height: 80px;
+    }
+    .footer {
+      font-size: 12px;
+      color: #888;
+      margin-top: 8px;
+    }
+  </style>
 </head>
 <body>
 <div class="card">
-  <div class="user">
-    <img src="{{.Face}}" alt="avatar">
-    <strong>{{.Name}}</strong>
+  <div class="qr">
+    <img src="https://api.qrserver.com/v1/create-qr-code/?size=100x100&data={{.room_url}}" alt="直播二维码">
   </div>
-  <h3>{{.LiveTitle}}</h3>
-  <img class="cover" src="{{.Cover}}" alt="cover">
+
+  <div class="user">
+    <img src="{{.face}}" alt="头像">
+    <div>
+      <div class="title">{{.name}}</div>
+      <div class="area">{{.parent_area_name}} - {{.area_name}}</div>
+    </div>
+  </div>
+
+  {{if eq .status 1}}
+  <div class="status">📢 正在直播中</div>
+  {{else}}
+  <div class="status" style="color:#999;">📴 直播已结束</div>
+  {{end}}
+
+  <div class="title">{{.live_title}}</div>
+  <img class="cover" src="{{.cover}}" alt="直播封面">
+
+  <div class="footer">
+    房间号：{{.room_id}} · <a href="{{.room_url}}" target="_blank">点击进入直播间</a>
+  </div>
 </div>
 </body>
 </html>
