@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/chromedp"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
@@ -11,6 +13,9 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"html/template"
+	"image"
+	"image/draw"
+	"image/png"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,6 +29,13 @@ type PushPayload struct {
 	Site string      `json:"site"`
 	Type string      `json:"type"`
 	Data interface{} `json:"data"`
+}
+
+type ElementRect struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
 }
 
 var (
@@ -185,12 +197,70 @@ func RenderScreenshot(html string) ([]byte, error) {
 		fileURL = "file:///" + absPath
 	}
 
-	var buf []byte
+	chromedp.Run(ctx,
+		emulation.SetDeviceMetricsOverride(1200, 2000, 1, false),
+		emulation.SetPageScaleFactor(1),
+	)
+
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(fileURL),
-		chromedp.FullScreenshot(&buf, int(renderQuality.Load())),
+		chromedp.WaitVisible(".card", chromedp.ByQuery),
+		chromedp.Evaluate(`document.querySelector('.card').scrollIntoView({block:'start', behavior:'instant'})`, nil),
+		chromedp.Sleep(150*time.Millisecond),
 	)
-	return buf, err
+	if err != nil {
+		return nil, fmt.Errorf("failed to evaluate JS: %w", err)
+	}
+
+	var js string
+	chromedp.Run(ctx,
+		chromedp.EvaluateAsDevTools(`(function() {
+			const el = document.querySelector('.card');
+			const r = el.getBoundingClientRect();
+			const x = Math.max(0, Math.floor(r.left));
+			const y = Math.max(0, Math.floor(r.top + (window.scrollY || document.documentElement.scrollTop)));
+			const w = Math.ceil(r.width);
+			const h = Math.ceil(r.height);
+			const dpr = window.devicePixelRatio || 1;
+			return JSON.stringify({ x, y, w, h, dpr });
+		  })()`, &js),
+	)
+
+	type Rect struct {
+		X, Y, W, H, DPR float64
+	}
+	var r Rect
+	json.Unmarshal([]byte(js), &r)
+
+	var full []byte
+	chromedp.Run(ctx, chromedp.FullScreenshot(&full, int(renderQuality.Load())))
+
+	img, _ := png.Decode(bytes.NewReader(full))
+
+	x := int(r.X * r.DPR)
+	y := int(r.Y * r.DPR)
+	w := int(r.W * r.DPR)
+	h := int(r.H * r.DPR)
+	pad := int(10 * r.DPR)
+
+	x -= pad
+	y -= pad
+	w += pad * 2
+	h += pad * 2
+
+	bounds := img.Bounds()
+	x = max(0, x)
+	y = max(0, y)
+	w = min(w, bounds.Dx()-x)
+	h = min(h, bounds.Dy()-y)
+
+	crop := image.Rect(x, y, x+w, y+h)
+	sub := image.NewRGBA(crop)
+	draw.Draw(sub, crop, img, crop.Min, draw.Src)
+
+	var out bytes.Buffer
+	png.Encode(&out, sub)
+	return out.Bytes(), nil
 }
 
 func AuthMiddleware() gin.HandlerFunc {
