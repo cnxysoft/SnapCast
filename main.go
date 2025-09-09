@@ -90,7 +90,7 @@ func RenderHandler(c *gin.Context) {
 
 	// 渲染 HTML
 	var buf bytes.Buffer
-	tmpl, err := template.ParseFiles(tmplPath)
+	tmpl, err := template.New(filepath.Base(tmplPath)).Funcs(funcsList).ParseFiles(tmplPath)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
