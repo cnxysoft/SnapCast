@@ -11,6 +11,7 @@
     <package value="SnapCast" />
     <directory value="$PROJECT_DIR$" />
     <filePath value="$PROJECT_DIR$" />
+    <output_directory value="H:/Develop/Github/SnapCast/dist" />
     <option name="run" value="false" />
     <method v="2" />
   </configuration>

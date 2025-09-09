@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/chromedp"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
@@ -197,15 +196,10 @@ func RenderScreenshot(html string) ([]byte, error) {
 		fileURL = "file:///" + absPath
 	}
 
-	chromedp.Run(ctx,
-		emulation.SetDeviceMetricsOverride(1200, 2000, 1, false),
-		emulation.SetPageScaleFactor(1),
-	)
-
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(fileURL),
-		chromedp.WaitVisible(".card", chromedp.ByQuery),
-		chromedp.Evaluate(`document.querySelector('.card').scrollIntoView({block:'start', behavior:'instant'})`, nil),
+		chromedp.WaitVisible("body", chromedp.ByQuery),
+		chromedp.Evaluate(`document.querySelector('body').scrollIntoView({block:'start', behavior:'instant'})`, nil),
 		chromedp.Sleep(150*time.Millisecond),
 	)
 	if err != nil {
@@ -215,7 +209,7 @@ func RenderScreenshot(html string) ([]byte, error) {
 	var js string
 	chromedp.Run(ctx,
 		chromedp.EvaluateAsDevTools(`(function() {
-			const el = document.querySelector('.card');
+			const el = document.querySelector('body');
 			const r = el.getBoundingClientRect();
 			const x = Math.max(0, Math.floor(r.left));
 			const y = Math.max(0, Math.floor(r.top + (window.scrollY || document.documentElement.scrollTop)));
@@ -241,12 +235,6 @@ func RenderScreenshot(html string) ([]byte, error) {
 	y := int(r.Y * r.DPR)
 	w := int(r.W * r.DPR)
 	h := int(r.H * r.DPR)
-	pad := int(10 * r.DPR)
-
-	x -= pad
-	y -= pad
-	w += pad * 2
-	h += pad * 2
 
 	bounds := img.Bounds()
 	x = max(0, x)
