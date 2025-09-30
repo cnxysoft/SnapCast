@@ -78,12 +78,14 @@ func main() {
 func RenderHandler(c *gin.Context) {
 	var payload PushPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
+		logger.Error(fmt.Sprintf("❌ 参数错误: %v", err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	tmplPath := selectTemplate(payload)
 	if tmplPath == "" {
+		logger.Error(fmt.Sprintf("❌ 未找到模板: %s/%s", payload.Site, payload.Type))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no template found"})
 		return
 	}
@@ -92,6 +94,7 @@ func RenderHandler(c *gin.Context) {
 	var buf bytes.Buffer
 	tmpl, err := template.New(filepath.Base(tmplPath)).Funcs(funcsList).ParseFiles(tmplPath)
 	if err != nil {
+		logger.Error(fmt.Sprintf("❌ 模板解析失败: %v", err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -101,7 +104,8 @@ func RenderHandler(c *gin.Context) {
 		}
 		err = safeExecuteTemplate(tmpl, payload.Data, &buf)
 		if err != nil {
-			logger.Error(fmt.Sprintf("execute template failed: %v", err))
+			logger.Error(fmt.Sprintf("❌ 模板渲染失败: %v", err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("execute template failed: %v", err)})
 			return
 		}
 	}
@@ -109,6 +113,7 @@ func RenderHandler(c *gin.Context) {
 	// 截图
 	imgBytes, err := RenderScreenshot(buf.String())
 	if err != nil {
+		logger.Error(fmt.Sprintf("❌ 截图失败: %v", err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -150,6 +155,7 @@ func findWindowsChromeOrEdge() string {
 	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil {
 			logger.Info(fmt.Sprintf("🧭 使用浏览器路径: %v", p))
+			globalBrowserPath.Store(p)
 			return p
 		}
 	}
@@ -167,6 +173,7 @@ func findLinuxChromePath() string {
 	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil {
 			logger.Info(fmt.Sprintf("🧭 使用浏览器路径: %v", p))
+			globalBrowserPath.Store(p)
 			return p
 		}
 	}
@@ -227,9 +234,23 @@ func RenderScreenshot(html string) ([]byte, error) {
 	json.Unmarshal([]byte(js), &r)
 
 	var full []byte
-	chromedp.Run(ctx, chromedp.FullScreenshot(&full, int(renderQuality.Load())))
+	err = chromedp.Run(ctx, chromedp.FullScreenshot(&full, int(renderQuality.Load())))
+	if err != nil {
+		return nil, fmt.Errorf("failed to take screenshot: %w", err)
+	}
 
-	img, _ := png.Decode(bytes.NewReader(full))
+	if len(full) == 0 {
+		return nil, fmt.Errorf("screenshot data is empty")
+	}
+
+	img, err := png.Decode(bytes.NewReader(full))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode screenshot: %w", err)
+	}
+
+	if img == nil {
+		return nil, fmt.Errorf("decoded image is nil")
+	}
 
 	x := int(r.X * r.DPR)
 	y := int(r.Y * r.DPR)
