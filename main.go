@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/chromedp"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
@@ -205,6 +207,7 @@ func RenderScreenshot(html string) ([]byte, error) {
 
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(fileURL),
+		emulation.SetDefaultBackgroundColorOverride().WithColor(&cdp.RGBA{R: 0, G: 0, B: 0, A: 0}),
 		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.Evaluate(`document.querySelector('body').scrollIntoView({block:'start', behavior:'instant'})`, nil),
 		chromedp.Sleep(150*time.Millisecond),
