@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"html/template"
+	"math"
 	"strconv"
 	"time"
 )
@@ -16,6 +18,32 @@ var funcsList = template.FuncMap{
 	"toString":       toString,
 	"isPositive":     isPositive,
 	"now":            now,
+
+	// 原样输出 JSON
+	"toJson": func(v interface{}) template.JS {
+		b, _ := json.Marshal(v)
+		return template.JS(b)
+	},
+
+	// 加法
+	"add": func(a, b float64) float64 {
+		return a + b
+	},
+	// 减法
+	"sub": func(a, b float64) float64 {
+		return a - b
+	},
+	// 乘法
+	"mul": func(a, b float64) float64 {
+		return a * b
+	},
+	// 除法（避免除零）
+	"div": func(a, b float64) float64 {
+		if b == 0 {
+			return math.NaN()
+		}
+		return a / b
+	},
 }
 
 func formatTime(ts float64) string {
