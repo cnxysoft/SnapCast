@@ -10,7 +10,6 @@ import (
 	"image/draw"
 	"image/png"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -204,10 +203,26 @@ func RenderScreenshot(html string) ([]byte, error) {
 	ctx, cancel := NewTabContext(renderTimeout.Load())
 	defer cancel()
 
-	dataURL := "data:text/html;charset=utf-8," + url.PathEscape(html)
+	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("screenshot_%d.html", time.Now().UnixNano()))
+	err := os.WriteFile(tmpFile, []byte(html), 0644)
+	if err != nil {
+		return nil, err
+	}
+	defer func(name string) {
+		err := os.Remove(name)
+		if err != nil {
+			logger.Error(fmt.Sprintf("❌ 删除临时文件失败: %v", err))
+		}
+	}(tmpFile)
 
-	err := chromedp.Run(ctx,
-		chromedp.Navigate(dataURL),
+	absPath, _ := filepath.Abs(tmpFile)
+	fileURL := "file://" + absPath
+	if runtime.GOOS != "windows" {
+		fileURL = "file:///" + absPath
+	}
+
+	err = chromedp.Run(ctx,
+		chromedp.Navigate(fileURL),
 		emulation.SetDefaultBackgroundColorOverride().WithColor(&cdp.RGBA{R: 0, G: 0, B: 0, A: 0}),
 		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.Evaluate(`document.querySelector('body').scrollIntoView({block:'start', behavior:'instant'})`, nil),
@@ -218,24 +233,30 @@ func RenderScreenshot(html string) ([]byte, error) {
 	}
 
 	var js string
-	chromedp.Run(ctx,
+	err = chromedp.Run(ctx,
 		chromedp.EvaluateAsDevTools(`(function() {
-			const el = document.querySelector('body');
-			const r = el.getBoundingClientRect();
-			const x = Math.max(0, Math.floor(r.left));
-			const y = Math.max(0, Math.floor(r.top + (window.scrollY || document.documentElement.scrollTop)));
-			const w = Math.ceil(r.width);
-			const h = Math.ceil(r.height);
-			const dpr = window.devicePixelRatio || 1;
-			return JSON.stringify({ x, y, w, h, dpr });
-		  })()`, &js),
+				const el = document.querySelector('body');
+				const r = el.getBoundingClientRect();
+				const x = Math.max(0, Math.floor(r.left));
+				const y = Math.max(0, Math.floor(r.top + (window.scrollY || document.documentElement.scrollTop)));
+				const w = Math.ceil(r.width);
+				const h = Math.ceil(r.height);
+				const dpr = window.devicePixelRatio || 1;
+				return JSON.stringify({ x, y, w, h, dpr });
+			  })()`, &js),
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	type Rect struct {
 		X, Y, W, H, DPR float64
 	}
 	var r Rect
-	json.Unmarshal([]byte(js), &r)
+	err = json.Unmarshal([]byte(js), &r)
+	if err != nil {
+		return nil, err
+	}
 
 	var full []byte
 	err = chromedp.Run(ctx, chromedp.FullScreenshot(&full, int(renderQuality.Load())))
@@ -272,7 +293,10 @@ func RenderScreenshot(html string) ([]byte, error) {
 	draw.Draw(sub, crop, img, crop.Min, draw.Src)
 
 	var out bytes.Buffer
-	png.Encode(&out, sub)
+	err = png.Encode(&out, sub)
+	if err != nil {
+		return nil, err
+	}
 	return out.Bytes(), nil
 }
 
