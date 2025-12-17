@@ -5,6 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html/template"
+	"image"
+	"image/draw"
+	"image/png"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
+	"time"
+
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/chromedp"
@@ -13,15 +24,6 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	"html/template"
-	"image"
-	"image/draw"
-	"image/png"
-	"net/http"
-	"os"
-	"path/filepath"
-	"runtime"
-	"time"
 )
 
 // ====== 数据结构 ======
@@ -47,6 +49,8 @@ var (
 	globalBrowserPath atomic.String
 	renderTimeout     atomic.Int64
 	renderQuality     atomic.Int32
+	globalAllocCtx    context.Context
+	globalAllocCancel context.CancelFunc
 )
 
 // ====== 主程序 ======
@@ -55,6 +59,9 @@ func main() {
 	InitLogger()
 	InitConfig()
 	WatchConfigChanges()
+	browserPath := resolveBrowserPath()
+	InitGlobalAllocator(browserPath)
+	defer globalAllocCancel()
 
 	templateDir := viper.GetString("template.dir")
 	err := loadTemplates(templateDir)
@@ -75,6 +82,16 @@ func main() {
 		logger.Fatal(fmt.Sprintf("❌ 服务器启动失败: %v", err))
 		return
 	}
+}
+
+func InitGlobalAllocator(browserPath string) {
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(browserPath),
+		chromedp.Flag("headless", true),
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("no-sandbox", true),
+	)
+	globalAllocCtx, globalAllocCancel = chromedp.NewExecAllocator(context.Background(), opts...)
 }
 
 func RenderHandler(c *gin.Context) {
@@ -184,34 +201,18 @@ func findLinuxChromePath() string {
 }
 
 func RenderScreenshot(html string) ([]byte, error) {
-	browserPath := resolveBrowserPath()
-
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.ExecPath(browserPath),
-		chromedp.Flag("headless", true),
-		chromedp.Flag("disable-gpu", true),
-		chromedp.Flag("no-sandbox", true),
-	)
-
-	ctx, cancel := NewRenderContext(opts, renderTimeout.Load())
+	ctx, cancel := NewTabContext(renderTimeout.Load())
 	defer cancel()
 
-	tmpFile := filepath.Join(os.TempDir(), "render.html")
-	os.WriteFile(tmpFile, []byte(html), 0644)
-
-	absPath, _ := filepath.Abs(tmpFile)
-	fileURL := "file://" + absPath
-	if runtime.GOOS != "windows" {
-		fileURL = "file:///" + absPath
-	}
+	dataURL := "data:text/html;charset=utf-8," + url.PathEscape(html)
 
 	err := chromedp.Run(ctx,
-		chromedp.Navigate(fileURL),
+		chromedp.Navigate(dataURL),
 		emulation.SetDefaultBackgroundColorOverride().WithColor(&cdp.RGBA{R: 0, G: 0, B: 0, A: 0}),
 		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.Evaluate(`document.querySelector('body').scrollIntoView({block:'start', behavior:'instant'})`, nil),
-		chromedp.Sleep(150*time.Millisecond),
 	)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to evaluate JS: %w", err)
 	}
@@ -290,15 +291,11 @@ func AuthMiddleware() gin.HandlerFunc {
 	}
 }
 
-func NewRenderContext(opts []chromedp.ExecAllocatorOption, timeoutMs int64) (context.Context, context.CancelFunc) {
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
+func NewTabContext(timeoutMs int64) (context.Context, context.CancelFunc) {
+	browserCtx, browserCancel := chromedp.NewContext(globalAllocCtx) // 新 tab
 	ctx, cancel := context.WithTimeout(browserCtx, time.Duration(timeoutMs)*time.Millisecond)
-
-	// 返回 ctx 和一个组合 cancel（释放所有资源）
 	return ctx, func() {
 		cancel()
 		browserCancel()
-		allocCancel()
 	}
 }
