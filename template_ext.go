@@ -21,6 +21,7 @@ var funcsList = template.FuncMap{
 
 	// 原样输出 JSON
 	"toJson": func(v interface{}) template.JS {
+		logger.Debug("⚠️ toJson 被调用，存在 XSS 风险")
 		b, _ := json.Marshal(v)
 		return template.JS(b)
 	},

@@ -68,10 +68,20 @@ func ApplyDynamicConfig() {
 	newBrowserPath := viper.GetString("render.browser_path")
 	globalBrowserPath.Store(newBrowserPath)
 
+	// quality 范围校验 (0-100)
 	newQuality := viper.GetInt32("render.quality")
+	if newQuality < 0 || newQuality > 100 {
+		logger.Warn(fmt.Sprintf("⚠️ render.quality 值无效: %d, 使用默认值 100", newQuality))
+		newQuality = 100
+	}
 	renderQuality.Store(newQuality)
 
+	// timeout 范围校验 (100ms - 60s)
 	newTimeout := viper.GetInt64("render.timeout_ms")
+	if newTimeout < 100 || newTimeout > 60000 {
+		logger.Warn(fmt.Sprintf("⚠️ render.timeout_ms 值无效: %d, 使用默认值 10000", newTimeout))
+		newTimeout = 10000
+	}
 	renderTimeout.Store(newTimeout)
 }
 

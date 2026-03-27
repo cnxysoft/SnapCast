@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/chromedp/cdproto/cdp"
@@ -23,6 +24,7 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"golang.org/x/sync/semaphore"
 )
 
 // ====== 数据结构 ======
@@ -33,15 +35,9 @@ type PushPayload struct {
 	Data interface{} `json:"data"`
 }
 
-type ElementRect struct {
-	X      float64 `json:"x"`
-	Y      float64 `json:"y"`
-	Width  float64 `json:"width"`
-	Height float64 `json:"height"`
-}
-
 var (
 	templateMap       = make(map[string]string)
+	templateMutex     sync.RWMutex
 	logger            *zap.Logger
 	logLevel          = zap.NewAtomicLevelAt(parseLogLevel(viper.GetString("logging.level")))
 	globalAuthToken   atomic.String
@@ -50,6 +46,7 @@ var (
 	renderQuality     atomic.Int32
 	globalAllocCtx    context.Context
 	globalAllocCancel context.CancelFunc
+	maxConcurrent     = semaphore.NewWeighted(10)
 )
 
 // ====== 主程序 ======
@@ -72,11 +69,18 @@ func main() {
 		watchTemplateDir(templateDir)
 	}
 
+	port := viper.GetString("server.port")
+	if port == "" {
+		logger.Fatal("❌ server.port 不能为空")
+		return
+	}
+	host := viper.GetString("server.host")
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 	r.Use(AuthMiddleware())
 	r.POST(viper.GetString("server.endpoint"), RenderHandler)
-	err = r.Run(viper.GetString("server.host") + ":" + viper.GetString("server.port"))
+	err = r.Run(host + ":" + port)
 	if err != nil {
 		logger.Fatal(fmt.Sprintf("❌ 服务器启动失败: %v", err))
 		return
@@ -94,6 +98,16 @@ func InitGlobalAllocator(browserPath string) {
 }
 
 func RenderHandler(c *gin.Context) {
+	// 获取信号量，超时 5 秒
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := maxConcurrent.Acquire(ctx, 1); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "server busy, try again later"})
+		return
+	}
+	defer maxConcurrent.Release(1)
+
 	var payload PushPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		logger.Error(fmt.Sprintf("❌ 参数错误: %v", err))
@@ -203,19 +217,19 @@ func RenderScreenshot(html string) ([]byte, error) {
 	ctx, cancel := NewTabContext(renderTimeout.Load())
 	defer cancel()
 
-	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("screenshot_%d.html", time.Now().UnixNano()))
-	err := os.WriteFile(tmpFile, []byte(html), 0644)
+	tmpFile, err := os.CreateTemp(os.TempDir(), "screenshot_*.html")
 	if err != nil {
 		return nil, err
 	}
-	defer func(name string) {
-		err := os.Remove(name)
-		if err != nil {
-			logger.Error(fmt.Sprintf("❌ 删除临时文件失败: %v", err))
-		}
-	}(tmpFile)
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	_, err = tmpFile.WriteString(html)
+	if err != nil {
+		return nil, err
+	}
+	tmpFile.Close()
 
-	absPath, _ := filepath.Abs(tmpFile)
+	absPath, _ := filepath.Abs(tmpPath)
 	fileURL := "file://" + absPath
 	if runtime.GOOS != "windows" {
 		fileURL = "file:///" + absPath

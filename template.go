@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 )
 
@@ -20,7 +21,15 @@ func debugFields(data any) {
 	logger.Debug(fmt.Sprintf("🧩 渲染字段: %v", reflect.ValueOf(m).MapKeys()))
 }
 
+var templateKeyRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+
 func selectTemplate(p PushPayload) string {
+	if !templateKeyRegex.MatchString(p.Site) || !templateKeyRegex.MatchString(p.Type) {
+		logger.Error(fmt.Sprintf("❌ 无效的站点或类型: site=%s, type=%s", p.Site, p.Type))
+		return ""
+	}
+	templateMutex.RLock()
+	defer templateMutex.RUnlock()
 	key := p.Site + "/" + p.Type
 	return templateMap[key]
 }
@@ -50,7 +59,9 @@ func watchTemplateDir(dir string) {
 						parts := strings.Split(strings.TrimSuffix(name, ".html"), "_")
 						if len(parts) == 2 {
 							key := parts[0] + "/" + parts[1]
+							templateMutex.Lock()
 							templateMap[key] = event.Name
+							templateMutex.Unlock()
 							logger.Info(fmt.Sprintf("🆕 模板更新: %s → %s", key, event.Name))
 						}
 					}
@@ -74,6 +85,8 @@ func loadTemplates(dir string) error {
 		return err
 	}
 
+	templateMutex.Lock()
+	defer templateMutex.Unlock()
 	for _, f := range files {
 		name := f.Name()
 		if strings.HasSuffix(name, ".html") {
