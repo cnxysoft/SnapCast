@@ -30,9 +30,10 @@ import (
 // ====== 数据结构 ======
 
 type PushPayload struct {
-	Site string      `json:"site"`
-	Type string      `json:"type"`
-	Data interface{} `json:"data"`
+	Site   string      `json:"site"`
+	Type   string      `json:"type"`
+	Output string      `json:"output"` // "image" (default) or "html"
+	Data   interface{} `json:"data"`
 }
 
 var (
@@ -140,6 +141,13 @@ func RenderHandler(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("execute template failed: %v", err)})
 			return
 		}
+	}
+
+	// 输出类型: html 直接返回渲染后的 HTML
+	if payload.Output == "html" {
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.Writer.Write(buf.Bytes())
+		return
 	}
 
 	// 截图
