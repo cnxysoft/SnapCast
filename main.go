@@ -78,8 +78,10 @@ func main() {
 	host := viper.GetString("server.host")
 
 	gin.SetMode(gin.ReleaseMode)
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery())
 	r.Use(AuthMiddleware())
+	r.Use(requestLoggerMiddleware())
 	r.POST(viper.GetString("server.endpoint"), RenderHandler)
 	err = r.Run(host + ":" + port)
 	if err != nil {
@@ -111,14 +113,17 @@ func RenderHandler(c *gin.Context) {
 
 	var payload PushPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
-		logger.Error(fmt.Sprintf("❌ 参数错误: %v", err))
+		logger.Error("❕ 传递参数有误", zap.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+	if payload.Output == "" {
+		payload.Output = "image"
 	}
 
 	tmplPath := selectTemplate(payload)
 	if tmplPath == "" {
-		logger.Error(fmt.Sprintf("❌ 未找到模板: %s/%s", payload.Site, payload.Type))
+		logger.Warn("❔ 未找到模板", zap.String("site", payload.Site), zap.String("type", payload.Type))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no template found"})
 		return
 	}
@@ -127,7 +132,7 @@ func RenderHandler(c *gin.Context) {
 	var buf bytes.Buffer
 	tmpl, err := template.New(filepath.Base(tmplPath)).Funcs(funcsList).ParseFiles(tmplPath)
 	if err != nil {
-		logger.Error(fmt.Sprintf("❌ 模板解析失败: %v", err))
+		logger.Error("❌ 模板解析失败", zap.Error(err), zap.String("template", tmplPath))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -137,7 +142,7 @@ func RenderHandler(c *gin.Context) {
 		}
 		err = safeExecuteTemplate(tmpl, payload.Data, &buf)
 		if err != nil {
-			logger.Error(fmt.Sprintf("❌ 模板渲染失败: %v", err))
+			logger.Error("❌ 模板渲染失败", zap.Error(err), zap.String("template", tmplPath))
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("execute template failed: %v", err)})
 			return
 		}
@@ -147,19 +152,87 @@ func RenderHandler(c *gin.Context) {
 	if payload.Output == "html" {
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.Writer.Write(buf.Bytes())
+		c.Set("render_site", payload.Site)
+		c.Set("render_type", payload.Type)
+		c.Set("render_template", tmplPath)
+		c.Set("render_output", payload.Output)
+		c.Set("render_html_size", buf.Len())
 		return
 	}
 
 	// 截图
 	imgBytes, err := RenderScreenshot(buf.String())
 	if err != nil {
-		logger.Error(fmt.Sprintf("❌ 截图失败: %v", err))
+		logger.Error("❌ 截图失败", zap.Error(err), zap.String("template", tmplPath))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	c.Header("Content-Type", "image/png")
 	c.Writer.Write(imgBytes)
+	c.Set("render_site", payload.Site)
+	c.Set("render_type", payload.Type)
+	c.Set("render_template", tmplPath)
+	c.Set("render_output", payload.Output)
+	c.Set("render_html_size", buf.Len())
+	c.Set("render_img_size", len(imgBytes))
+}
+
+func requestLoggerMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		path := c.Request.URL.Path
+		query := c.Request.URL.RawQuery
+
+		c.Next()
+
+		latency := time.Since(start)
+		status := c.Writer.Status()
+		clientIP := c.ClientIP()
+		method := c.Request.Method
+
+		fields := []zap.Field{
+			zap.String("method", method),
+			zap.String("path", path),
+			zap.Int("status", status),
+			zap.String("latency", latency.String()),
+			zap.String("client_ip", clientIP),
+		}
+
+		if query != "" {
+			fields = append(fields, zap.String("query", query))
+		}
+
+		if site, exists := c.Get("render_site"); exists {
+			fields = append(fields, zap.String("site", site.(string)))
+		}
+		if tp, exists := c.Get("render_type"); exists {
+			fields = append(fields, zap.String("type", tp.(string)))
+		}
+		if tmpl, exists := c.Get("render_template"); exists {
+			fields = append(fields, zap.String("template", tmpl.(string)))
+		}
+		if output, exists := c.Get("render_output"); exists {
+			fields = append(fields, zap.String("output", output.(string)))
+		}
+		if imgSize, exists := c.Get("render_img_size"); exists {
+			fields = append(fields, zap.String("img_size", formatBytes(imgSize.(int))))
+		} else if htmlSize, exists := c.Get("render_html_size"); exists {
+			fields = append(fields, zap.String("html_size", formatBytes(htmlSize.(int))))
+		}
+
+		logger.Info("❇️ 请求已完成", fields...)
+	}
+}
+
+func formatBytes(n int) string {
+	if n >= 1024*1024 {
+		return fmt.Sprintf("%.1fMB", float64(n)/1024/1024)
+	}
+	if n >= 1024 {
+		return fmt.Sprintf("%.1fKB", float64(n)/1024)
+	}
+	return fmt.Sprintf("%dB", n)
 }
 
 func resolveBrowserPath() string {
@@ -199,7 +272,7 @@ func findWindowsChromeOrEdge() string {
 			return p
 		}
 	}
-	logger.Warn("⚠️ 未找到浏览器路径，请在配置文件中指定 render.browser_path")
+	logger.Warn("❕️ 未找到浏览器路径，请在配置文件中指定 render.browser_path")
 	return ""
 }
 
@@ -217,7 +290,7 @@ func findLinuxChromePath() string {
 			return p
 		}
 	}
-	logger.Warn("⚠️ 未找到浏览器路径，请在配置文件中指定 render.browser_path")
+	logger.Warn("❕ 未找到浏览器路径，请在配置文件中指定 render.browser_path")
 	return ""
 }
 

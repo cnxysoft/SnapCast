@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/fsnotify/fsnotify"
 	"html/template"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 func debugFields(data any) {
@@ -47,7 +48,7 @@ func safeExecuteTemplate(tmpl *template.Template, data any, buf *bytes.Buffer) (
 func watchTemplateDir(dir string) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		logger.Fatal(fmt.Sprintf("监听器启动失败: %v", err))
+		logger.Fatal(fmt.Sprintf("❌ 监听器启动失败: %v", err))
 	}
 	go func() {
 		for {
@@ -66,8 +67,21 @@ func watchTemplateDir(dir string) {
 						}
 					}
 				}
+				if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+					if strings.HasSuffix(event.Name, ".html") {
+						name := filepath.Base(event.Name)
+						parts := strings.Split(strings.TrimSuffix(name, ".html"), "_")
+						if len(parts) == 2 {
+							key := parts[0] + "/" + parts[1]
+							templateMutex.Lock()
+							delete(templateMap, key)
+							templateMutex.Unlock()
+							logger.Info(fmt.Sprintf("🗑️ 模板移除: %s → %s", key, event.Name))
+						}
+					}
+				}
 			case err = <-watcher.Errors:
-				logger.Error(fmt.Sprintf("监听器错误: %v", err))
+				logger.Error(fmt.Sprintf("❌ 监听器错误: %v", err))
 			}
 		}
 	}()
