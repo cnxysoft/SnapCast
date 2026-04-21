@@ -19,7 +19,27 @@ func debugFields(data any) {
 	b, _ := json.Marshal(data)
 	var m map[string]any
 	json.Unmarshal(b, &m)
-	logger.Debug(fmt.Sprintf("🧩 渲染字段: %v", reflect.ValueOf(m).MapKeys()))
+	keys := reflect.ValueOf(m).MapKeys()
+	if len(keys) == 0 {
+		logger.Debug("🧩 渲染字段: (无)")
+		return
+	}
+	logger.Debug(fmt.Sprintf("🧩 渲染字段: %v", keys))
+}
+
+func debugPayload(p PushPayload) {
+	msg := fmt.Sprintf("📦 请求参数: site=%s type=%s output=%s", p.Site, p.Type, p.Output)
+	if p.Timeout > 0 {
+		msg += fmt.Sprintf(" timeout=%dms", p.Timeout)
+	}
+	if p.UserAgent != "" {
+		msg += fmt.Sprintf(" user_agent=%s", p.UserAgent)
+	}
+	if p.Data != nil {
+		dataJson, _ := json.Marshal(p.Data)
+		msg += fmt.Sprintf(" data=%s", dataJson)
+	}
+	logger.Debug(msg)
 }
 
 var templateKeyRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)

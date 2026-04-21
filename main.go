@@ -30,10 +30,12 @@ import (
 // ====== 数据结构 ======
 
 type PushPayload struct {
-	Site   string      `json:"site"`
-	Type   string      `json:"type"`
-	Output string      `json:"output"` // "image" (default) or "html"
-	Data   interface{} `json:"data"`
+	Site      string      `json:"site"`
+	Type      string      `json:"type"`
+	Output    string      `json:"output"` // "image" (default), "html", or "json"
+	Data      interface{} `json:"data"`
+	Timeout   int64       `json:"timeout"`    // 自定义超时(ms)，优先于配置
+	UserAgent string      `json:"user_agent"` // 自定义 UA
 }
 
 var (
@@ -120,6 +122,9 @@ func RenderHandler(c *gin.Context) {
 	if payload.Output == "" {
 		payload.Output = "image"
 	}
+	if logLevel.Level() == zapcore.DebugLevel {
+		debugPayload(payload)
+	}
 
 	tmplPath := selectTemplate(payload)
 	if tmplPath == "" {
@@ -160,8 +165,33 @@ func RenderHandler(c *gin.Context) {
 		return
 	}
 
+	// 输出类型: json 执行 JS 并返回序列化结果
+	if payload.Output == "json" {
+		c.Header("Content-Type", "application/json")
+		timeout := payload.Timeout
+		if timeout <= 0 {
+			timeout = renderTimeout.Load()
+		}
+		result, err := RenderJS(buf.String(), timeout, payload.UserAgent)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, result)
+		c.Set("render_site", payload.Site)
+		c.Set("render_type", payload.Type)
+		c.Set("render_template", tmplPath)
+		c.Set("render_output", payload.Output)
+		c.Set("render_html_size", buf.Len())
+		return
+	}
+
 	// 截图
-	imgBytes, err := RenderScreenshot(buf.String())
+	timeout := payload.Timeout
+	if timeout <= 0 {
+		timeout = renderTimeout.Load()
+	}
+	imgBytes, err := RenderScreenshot(buf.String(), timeout)
 	if err != nil {
 		logger.Error("❌ 截图失败", zap.Error(err), zap.String("template", tmplPath))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -221,7 +251,7 @@ func requestLoggerMiddleware() gin.HandlerFunc {
 			fields = append(fields, zap.String("html_size", formatBytes(htmlSize.(int))))
 		}
 
-		logger.Info("❇️ 请求已完成", fields...)
+		logger.Info("❇️ 请求结果", fields...)
 	}
 }
 
@@ -294,8 +324,8 @@ func findLinuxChromePath() string {
 	return ""
 }
 
-func RenderScreenshot(html string) ([]byte, error) {
-	ctx, cancel := NewTabContext(renderTimeout.Load())
+func RenderScreenshot(html string, timeoutMs int64) ([]byte, error) {
+	ctx, cancel := NewTabContext(timeoutMs)
 	defer cancel()
 
 	tmpFile, err := os.CreateTemp(os.TempDir(), "screenshot_*.html")
@@ -393,6 +423,73 @@ func RenderScreenshot(html string) ([]byte, error) {
 		return nil, err
 	}
 	return out.Bytes(), nil
+}
+
+func RenderJS(html string, timeoutMs int64, userAgent string) (map[string]any, error) {
+	ctx, cancel := NewTabContext(timeoutMs)
+	defer cancel()
+
+	tmpFile, err := os.CreateTemp(os.TempDir(), "snapcast_js_*.html")
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	_, err = tmpFile.WriteString(html)
+	if err != nil {
+		return nil, err
+	}
+	tmpFile.Close()
+
+	absPath, _ := filepath.Abs(tmpPath)
+	fileURL := "file://" + absPath
+	if runtime.GOOS != "windows" {
+		fileURL = "file:///" + absPath
+	}
+
+	runOpts := []chromedp.Action{
+		chromedp.Navigate(fileURL),
+		chromedp.WaitVisible("body", chromedp.ByQuery),
+	}
+	if userAgent != "" {
+		runOpts = append([]chromedp.Action{emulation.SetUserAgentOverride(userAgent)}, runOpts...)
+	}
+
+	err = chromedp.Run(ctx, runOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("navigate failed: %w", err)
+	}
+
+	var jsResult string
+	pollTimeout := 10 * time.Second
+	if timeoutMs < 10000 {
+		pollTimeout = time.Duration(timeoutMs) * time.Millisecond
+	}
+	err = chromedp.Run(ctx, chromedp.PollFunction(`() => {
+		const r = window.SnapCastResult;
+		if (r !== undefined && r !== null) return JSON.stringify(r);
+		return null;
+	}`, &jsResult,
+		chromedp.WithPollingInterval(500*time.Millisecond),
+		chromedp.WithPollingTimeout(pollTimeout),
+	))
+	if err != nil {
+		return nil, fmt.Errorf("poll result failed: %w", err)
+	}
+
+	if jsResult == "null" || jsResult == "" {
+		return nil, fmt.Errorf("SnapCastResult not set within timeout")
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(jsResult), &result); err != nil {
+		return nil, fmt.Errorf("invalid JSON result: %w", err)
+	}
+
+	return map[string]any{
+		"status": "ok",
+		"data":   result,
+	}, nil
 }
 
 func AuthMiddleware() gin.HandlerFunc {
