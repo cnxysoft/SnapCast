@@ -11,7 +11,12 @@
 - **热更新**：模板文件修改自动重新加载（需配置 `template.watch: true`）
 - **配置热重载**：修改配置文件无需重启服务
 - **自定义 User-Agent**：可为 JSON 模式指定浏览器 UA
-- **自定义超时**：可按请求指定超时时间
+- **自定义超时**：支持 `5000`、`"5s"`、`"5000ms"` 等格式
+- **IP 黑白名单**：支持单个 IP 和 CIDR 网段过滤
+- **统一响应格式**：`{"status": "ok/error", "data/message": ...}`
+- **Bearer Token 认证**：支持 `Authorization: Bearer <token>` 格式
+- **IP 限流**：滑动窗口算法，支持网段共享限额
+- **并发控制**：可配置最大并发渲染数，支持热重载
 
 ## 快速开始
 
@@ -50,11 +55,13 @@ curl -X POST http://127.0.0.1:8080/render \
   "site": "站点名",
   "type": "类型名",
   "output": "image | html | json",
-  "data": { ... },
+  "data": { "...": "..." },
   "timeout": 5000,
   "user_agent": "自定义UA"
 }
 ```
+
+> `timeout` 支持：`5000`（数字，毫秒）、`"5s"`（字符串秒）、`"5000ms"`（字符串毫秒）
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
@@ -62,7 +69,7 @@ curl -X POST http://127.0.0.1:8080/render \
 | `type` | 是 | 类型名称 |
 | `output` | 否 | 输出模式：`image`（默认）、`html`、`json` |
 | `data` | 否 | 模板渲染数据 |
-| `timeout` | 否 | 超时时间（毫秒），优先于配置文件 |
+| `timeout` | 否 | 超时时间，支持数字(毫秒)、"10s"、"5000ms" |
 | `user_agent` | 否 | 自定义 User-Agent（JSON 模式生效） |
 
 ## 输出模式
@@ -183,9 +190,20 @@ server:
   host: "0.0.0.0"
   port: 8080
   endpoint: "/render"
+  max_connections: 10
 
 auth:
   token: ""  # Authorization header token，留空则禁用
+
+ip_filter:
+  whitelist: []  # 白名单模式，为空则使用黑名单模式
+  blacklist: []  # 黑名单，支持单个 IP 或 CIDR 网段
+
+rate_limit:
+  enabled: false  # 是否启用 IP 限流
+  window: "1s"   # 时间窗口: "1s", "1m"
+  max_requests: 60
+  mask: 24       # IP 掩码位数，24=/24 网段共享限额
 
 template:
   dir: "./templates"
@@ -193,11 +211,40 @@ template:
 
 render:
   browser_path: ""  # 留空则自动检测 Chrome/Edge
-  timeout_ms: 10000
+  timeout: 10000    # 支持数字(毫秒)、"10s"、"10000ms"
   quality: 100
 
 logging:
   level: "info"  # debug, info, warn, error
+```
+
+### IP 黑白名单
+
+支持单个 IP 和 CIDR 网段：
+
+```yaml
+ip_filter:
+  whitelist: []              # 白名单模式：只有列表中的 IP 可以访问
+  blacklist:                 # 黑名单模式：禁止列表中的 IP 访问
+    - 192.168.1.0/24         # 网段
+    - 10.0.0.1               # 单个 IP
+```
+
+### Rate Limit
+
+IP 限流，滑动窗口算法：
+
+```yaml
+rate_limit:
+  enabled: false        # 是否启用
+  window: "1s"          # 时间窗口: "1s", "1m"
+  max_requests: 60      # 单个 IP/网段每窗口最大请求数
+  mask: 24              # IP 掩码位数，24=/24 网段共享限额
+```
+
+超限返回 429：
+```json
+{"status": "error", "message": "rate limit exceeded, try again later"}
 ```
 
 ### 调试日志
@@ -217,9 +264,11 @@ SnapCast/
 ├── config.go         # 配置管理
 ├── template.go       # 模板加载与工具函数
 ├── template_ext.go   # 模板函数扩展
+├── ip.go             # IP 黑白名单过滤
+├── ratelimit.go      # IP 限流
 ├── logger.go         # 日志初始化
 ├── snapcast.yaml     # 配置文件（自动生成）
-└── templates/         # HTML 模板目录
+└── templates/        # HTML 模板目录
     └── {site}_{type}.html
 ```
 

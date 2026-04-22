@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,10 +23,9 @@ import (
 	"github.com/chromedp/chromedp"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
-	"go.uber.org/atomic"
+	uatomic "go.uber.org/atomic"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	"golang.org/x/sync/semaphore"
 )
 
 // ====== 数据结构 ======
@@ -34,22 +35,69 @@ type PushPayload struct {
 	Type      string      `json:"type"`
 	Output    string      `json:"output"` // "image" (default), "html", or "json"
 	Data      interface{} `json:"data"`
-	Timeout   int64       `json:"timeout"`    // 自定义超时(ms)，优先于配置
+	Timeout   any         `json:"timeout"`    // 自定义超时(ms)，支持数字或字符串如 "60s", "3000ms"
 	UserAgent string      `json:"user_agent"` // 自定义 UA
 }
 
+type APIResponse struct {
+	Status  string      `json:"status"`            // "ok" | "error"
+	Message string      `json:"message,omitempty"` // 错误信息
+	Data    interface{} `json:"data,omitempty"`    // 成功时的数据
+}
+
+func ok(data interface{}) APIResponse {
+	return APIResponse{Status: "ok", Data: data}
+}
+
+func errResp(message string) APIResponse {
+	return APIResponse{Status: "error", Message: message}
+}
+
+// ParseDuration 解析 duration 参数
+// 支持：数字(int/int64/float64 视为毫秒)、字符串如 "60s", "3000ms", "1m"
+func ParseDuration(v any) (time.Duration, error) {
+	if v == nil {
+		return 0, nil
+	}
+	switch val := v.(type) {
+	case int64:
+		return time.Duration(val) * time.Millisecond, nil
+	case int:
+		return time.Duration(val) * time.Millisecond, nil
+	case float64:
+		return time.Duration(val) * time.Millisecond, nil
+	case string:
+		s := strings.TrimSpace(val)
+		if s == "" {
+			return 0, nil
+		}
+		// 尝试直接解析
+		if d, err := time.ParseDuration(s); err == nil {
+			return d, nil
+		}
+		// 纯数字（毫秒）
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return time.Duration(n) * time.Millisecond, nil
+		}
+		return 0, fmt.Errorf("invalid duration: %s", s)
+	}
+	return 0, fmt.Errorf("invalid duration type: %T", v)
+}
+
 var (
-	templateMap       = make(map[string]string)
-	templateMutex     sync.RWMutex
-	logger            *zap.Logger
-	logLevel          = zap.NewAtomicLevelAt(parseLogLevel(viper.GetString("logging.level")))
-	globalAuthToken   atomic.String
-	globalBrowserPath atomic.String
-	renderTimeout     atomic.Int64
-	renderQuality     atomic.Int32
+	templateMap        = make(map[string]string)
+	templateMutex      sync.RWMutex
+	logger             *zap.Logger
+	logLevel           = zap.NewAtomicLevelAt(parseLogLevel(viper.GetString("logging.level")))
+	globalAuthToken    uatomic.String
+	globalBrowserPath  uatomic.String
+	renderTimeout      uatomic.Int64
+	renderQuality     uatomic.Int32
 	globalAllocCtx    context.Context
-	globalAllocCancel context.CancelFunc
-	maxConcurrent     = semaphore.NewWeighted(10)
+	globalAllocCancel  context.CancelFunc
+	concurrentMutex   sync.Mutex
+	currentConcurrent int32
+	maxConcurrent     int32 // 最大并发数，可动态调整
 )
 
 // ====== 主程序 ======
@@ -58,6 +106,8 @@ func main() {
 	InitLogger()
 	InitConfig()
 	WatchConfigChanges()
+	ConfigureRateLimiter(false, time.Second, 100, 24) // 默认禁用，启动后由 ApplyDynamicConfig 配置
+	StartRateLimiterCleanup(time.Minute)
 	browserPath := resolveBrowserPath()
 	InitGlobalAllocator(browserPath)
 	defer globalAllocCancel()
@@ -65,7 +115,7 @@ func main() {
 	templateDir := viper.GetString("template.dir")
 	err := loadTemplates(templateDir)
 	if err != nil {
-		logger.Fatal(fmt.Sprintf("❌ 加载模板失败: %v", err))
+		logger.Fatal("❌ 加载模板失败", zap.Error(err))
 		return
 	}
 	if viper.GetBool("template.watch") {
@@ -82,12 +132,22 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(IPFilterMiddleware())
+	r.Use(RateLimitMiddleware())
 	r.Use(AuthMiddleware())
 	r.Use(requestLoggerMiddleware())
+	r.NoRoute(func(c *gin.Context) {
+		logger.Warn("❕ 路由未找到", zap.String("path", c.Request.URL.Path))
+		c.JSON(http.StatusNotFound, errResp("endpoint not found"))
+	})
+	r.NoMethod(func(c *gin.Context) {
+		logger.Warn("❕ 方法不允许", zap.String("method", c.Request.Method), zap.String("path", c.Request.URL.Path))
+		c.JSON(http.StatusMethodNotAllowed, errResp("method not allowed"))
+	})
 	r.POST(viper.GetString("server.endpoint"), RenderHandler)
 	err = r.Run(host + ":" + port)
 	if err != nil {
-		logger.Fatal(fmt.Sprintf("❌ 服务器启动失败: %v", err))
+		logger.Fatal("❌ 服务器启动失败", zap.Error(err))
 		return
 	}
 }
@@ -107,20 +167,48 @@ func RenderHandler(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	if err := maxConcurrent.Acquire(ctx, 1); err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "server busy, try again later"})
+	_ = ctx // ctx 用于超时控制，实际渲染使用新 tab
+
+	// 尝试获取并发许可
+	concurrentMutex.Lock()
+	if currentConcurrent >= maxConcurrent {
+		concurrentMutex.Unlock()
+		c.JSON(http.StatusServiceUnavailable, errResp("server busy, try again later"))
 		return
 	}
-	defer maxConcurrent.Release(1)
+	currentConcurrent++
+	concurrentMutex.Unlock()
+	defer func() {
+		concurrentMutex.Lock()
+		currentConcurrent--
+		concurrentMutex.Unlock()
+	}()
 
 	var payload PushPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		logger.Error("❕ 传递参数有误", zap.Error(err))
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, errResp(err.Error()))
 		return
 	}
 	if payload.Output == "" {
 		payload.Output = "image"
+	}
+	// output 字段校验
+	if payload.Output != "image" && payload.Output != "html" && payload.Output != "json" {
+		logger.Warn("❕ 无效的 output 参数", zap.String("output", payload.Output))
+		c.JSON(http.StatusBadRequest, errResp("invalid output: must be image, html, or json"))
+		return
+	}
+	// 解析 timeout
+	timeout, err := ParseDuration(payload.Timeout)
+	if err != nil {
+		logger.Warn("❕ 无效的 timeout 参数", zap.Any("timeout", payload.Timeout))
+		c.JSON(http.StatusBadRequest, errResp(err.Error()))
+		return
+	}
+	timeoutMs := timeout.Milliseconds()
+	if timeoutMs <= 0 {
+		timeoutMs = renderTimeout.Load()
 	}
 	if logLevel.Level() == zapcore.DebugLevel {
 		debugPayload(payload)
@@ -129,7 +217,7 @@ func RenderHandler(c *gin.Context) {
 	tmplPath := selectTemplate(payload)
 	if tmplPath == "" {
 		logger.Warn("❔ 未找到模板", zap.String("site", payload.Site), zap.String("type", payload.Type))
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no template found"})
+		c.JSON(http.StatusBadRequest, errResp("no template found"))
 		return
 	}
 
@@ -138,7 +226,7 @@ func RenderHandler(c *gin.Context) {
 	tmpl, err := template.New(filepath.Base(tmplPath)).Funcs(funcsList).ParseFiles(tmplPath)
 	if err != nil {
 		logger.Error("❌ 模板解析失败", zap.Error(err), zap.String("template", tmplPath))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, errResp(err.Error()))
 		return
 	}
 	if payload.Data != nil {
@@ -148,7 +236,7 @@ func RenderHandler(c *gin.Context) {
 		err = safeExecuteTemplate(tmpl, payload.Data, &buf)
 		if err != nil {
 			logger.Error("❌ 模板渲染失败", zap.Error(err), zap.String("template", tmplPath))
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("execute template failed: %v", err)})
+			c.JSON(http.StatusInternalServerError, errResp(fmt.Sprintf("execute template failed: %v", err)))
 			return
 		}
 	}
@@ -168,16 +256,12 @@ func RenderHandler(c *gin.Context) {
 	// 输出类型: json 执行 JS 并返回序列化结果
 	if payload.Output == "json" {
 		c.Header("Content-Type", "application/json")
-		timeout := payload.Timeout
-		if timeout <= 0 {
-			timeout = renderTimeout.Load()
-		}
-		result, err := RenderJS(buf.String(), timeout, payload.UserAgent)
+		result, err := RenderJS(buf.String(), timeoutMs, payload.UserAgent)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
+			c.JSON(http.StatusInternalServerError, errResp(err.Error()))
 			return
 		}
-		c.JSON(http.StatusOK, result)
+		c.JSON(http.StatusOK, ok(result))
 		c.Set("render_site", payload.Site)
 		c.Set("render_type", payload.Type)
 		c.Set("render_template", tmplPath)
@@ -187,14 +271,10 @@ func RenderHandler(c *gin.Context) {
 	}
 
 	// 截图
-	timeout := payload.Timeout
-	if timeout <= 0 {
-		timeout = renderTimeout.Load()
-	}
-	imgBytes, err := RenderScreenshot(buf.String(), timeout)
+	imgBytes, err := RenderScreenshot(buf.String(), timeoutMs)
 	if err != nil {
 		logger.Error("❌ 截图失败", zap.Error(err), zap.String("template", tmplPath))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, errResp(err.Error()))
 		return
 	}
 
@@ -297,7 +377,7 @@ func findWindowsChromeOrEdge() string {
 
 	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil {
-			logger.Info(fmt.Sprintf("🧭 使用浏览器路径: %v", p))
+			logger.Info("🧭 使用浏览器路径", zap.String("path", p))
 			globalBrowserPath.Store(p)
 			return p
 		}
@@ -312,10 +392,12 @@ func findLinuxChromePath() string {
 		"/usr/bin/chromium-browser",
 		"/usr/bin/chromium",
 		"/snap/bin/chromium",
+		"/usr/bin/microsoft-edge",
+		"/usr/bin/edge",
 	}
 	for _, p := range paths {
 		if _, err := os.Stat(p); err == nil {
-			logger.Info(fmt.Sprintf("🧭 使用浏览器路径: %v", p))
+			logger.Info("🧭 使用浏览器路径", zap.String("path", p))
 			globalBrowserPath.Store(p)
 			return p
 		}
@@ -333,12 +415,18 @@ func RenderScreenshot(html string, timeoutMs int64) ([]byte, error) {
 		return nil, err
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+	defer func() {
+		tmpFile.Close()
+		if err := os.Remove(tmpPath); err != nil {
+			logger.Debug("🗑️ 临时文件删除失败", zap.String("path", tmpPath), zap.Error(err))
+		} else {
+			logger.Debug("🗑️ 临时文件已删除", zap.String("path", tmpPath))
+		}
+	}()
 	_, err = tmpFile.WriteString(html)
 	if err != nil {
 		return nil, err
 	}
-	tmpFile.Close()
 
 	absPath, _ := filepath.Abs(tmpPath)
 	fileURL := "file://" + absPath
@@ -425,7 +513,7 @@ func RenderScreenshot(html string, timeoutMs int64) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-func RenderJS(html string, timeoutMs int64, userAgent string) (map[string]any, error) {
+func RenderJS(html string, timeoutMs int64, userAgent string) (any, error) {
 	ctx, cancel := NewTabContext(timeoutMs)
 	defer cancel()
 
@@ -434,12 +522,18 @@ func RenderJS(html string, timeoutMs int64, userAgent string) (map[string]any, e
 		return nil, err
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+	defer func() {
+		tmpFile.Close()
+		if err := os.Remove(tmpPath); err != nil {
+			logger.Debug("🗑️ 临时文件删除失败", zap.String("path", tmpPath), zap.Error(err))
+		} else {
+			logger.Debug("🗑️ 临时文件已删除", zap.String("path", tmpPath))
+		}
+	}()
 	_, err = tmpFile.WriteString(html)
 	if err != nil {
 		return nil, err
 	}
-	tmpFile.Close()
 
 	absPath, _ := filepath.Abs(tmpPath)
 	fileURL := "file://" + absPath
@@ -481,15 +575,12 @@ func RenderJS(html string, timeoutMs int64, userAgent string) (map[string]any, e
 		return nil, fmt.Errorf("SnapCastResult not set within timeout")
 	}
 
-	var result map[string]any
+	var result any
 	if err := json.Unmarshal([]byte(jsResult), &result); err != nil {
 		return nil, fmt.Errorf("invalid JSON result: %w", err)
 	}
 
-	return map[string]any{
-		"status": "ok",
-		"data":   result,
-	}, nil
+	return result, nil
 }
 
 func AuthMiddleware() gin.HandlerFunc {
@@ -497,10 +588,27 @@ func AuthMiddleware() gin.HandlerFunc {
 		authHeader := c.GetHeader("Authorization")
 		expected := globalAuthToken.Load()
 
-		if expected != "" && authHeader != expected {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "unauthorized",
-			})
+		if expected != "" {
+			token := authHeader
+			if len(authHeader) >= 7 && strings.ToLower(authHeader[:6]) == "bearer" {
+				token = strings.TrimSpace(authHeader[6:])
+			}
+			if token != expected {
+				logger.Warn("🔐 认证失败", zap.String("client_ip", GetClientIP(c)))
+				c.AbortWithStatusJSON(http.StatusUnauthorized, errResp("unauthorized"))
+				return
+			}
+		}
+		c.Next()
+	}
+}
+
+func IPFilterMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		clientIP := GetClientIP(c)
+		if !globalIPList.IsAllowed(clientIP) {
+			logger.Warn("⛔ IP 被拒绝", zap.String("client_ip", clientIP))
+			c.AbortWithStatusJSON(http.StatusForbidden, errResp("ip forbidden"))
 			return
 		}
 		c.Next()

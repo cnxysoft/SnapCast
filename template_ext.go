@@ -23,7 +23,6 @@ var funcsList = template.FuncMap{
 
 	// ========== JSON ==========
 	"toJson": func(v any) template.JS {
-		logger.Debug("❗ toJson 被调用，存在 XSS 风险")
 		b, _ := json.Marshal(v)
 		return template.JS(b)
 	},

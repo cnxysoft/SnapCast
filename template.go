@@ -13,40 +13,54 @@ import (
 	"strings"
 
 	"github.com/fsnotify/fsnotify"
+	"go.uber.org/zap"
 )
 
 func debugFields(data any) {
-	b, _ := json.Marshal(data)
-	var m map[string]any
-	json.Unmarshal(b, &m)
-	keys := reflect.ValueOf(m).MapKeys()
-	if len(keys) == 0 {
-		logger.Debug("🧩 渲染字段: (无)")
+	b, err := json.Marshal(data)
+	if err != nil {
+		logger.Debug("🧩 渲染字段", zap.String("status", "序列化失败"))
 		return
 	}
-	logger.Debug(fmt.Sprintf("🧩 渲染字段: %v", keys))
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		logger.Debug("🧩 渲染字段", zap.String("status", "反序列化失败"))
+		return
+	}
+	keys := reflect.ValueOf(m).MapKeys()
+	if len(keys) == 0 {
+		logger.Debug("🧩 渲染字段", zap.String("status", "无"))
+		return
+	}
+	fieldNames := make([]string, len(keys))
+	for i, k := range keys {
+		fieldNames[i] = k.String()
+	}
+	logger.Debug("🧩 渲染字段", zap.Strings("fields", fieldNames))
 }
 
 func debugPayload(p PushPayload) {
-	msg := fmt.Sprintf("📦 请求参数: site=%s type=%s output=%s", p.Site, p.Type, p.Output)
-	if p.Timeout > 0 {
-		msg += fmt.Sprintf(" timeout=%dms", p.Timeout)
+	logger.Debug("📦 请求参数",
+		zap.String("site", p.Site),
+		zap.String("type", p.Type),
+		zap.String("output", p.Output),
+	)
+	if timeout, err := ParseDuration(p.Timeout); err == nil && timeout > 0 {
+		logger.Debug("⏱️ 超时设置", zap.Int64("timeout_ms", timeout.Milliseconds()))
 	}
 	if p.UserAgent != "" {
-		msg += fmt.Sprintf(" user_agent=%s", p.UserAgent)
+		logger.Debug("🌐 UserAgent", zap.String("ua", p.UserAgent))
 	}
 	if p.Data != nil {
-		dataJson, _ := json.Marshal(p.Data)
-		msg += fmt.Sprintf(" data=%s", dataJson)
+		logger.Debug("📊 请求数据", zap.Any("data", p.Data))
 	}
-	logger.Debug(msg)
 }
 
 var templateKeyRegex = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 
 func selectTemplate(p PushPayload) string {
 	if !templateKeyRegex.MatchString(p.Site) || !templateKeyRegex.MatchString(p.Type) {
-		logger.Error(fmt.Sprintf("❌ 无效的站点或类型: site=%s, type=%s", p.Site, p.Type))
+		logger.Error("❌ 无效的站点或类型", zap.String("site", p.Site), zap.String("type", p.Type))
 		return ""
 	}
 	templateMutex.RLock()
@@ -58,7 +72,7 @@ func selectTemplate(p PushPayload) string {
 func safeExecuteTemplate(tmpl *template.Template, data any, buf *bytes.Buffer) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("模板渲染 panic: %v", r)
+			err = fmt.Errorf("❌ 模板渲染 panic: %v", r)
 		}
 	}()
 	err = tmpl.Execute(buf, data)
@@ -68,7 +82,7 @@ func safeExecuteTemplate(tmpl *template.Template, data any, buf *bytes.Buffer) (
 func watchTemplateDir(dir string) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		logger.Fatal(fmt.Sprintf("❌ 监听器启动失败: %v", err))
+		logger.Fatal("❌ 监听器启动失败", zap.Error(err))
 	}
 	go func() {
 		for {
@@ -83,7 +97,7 @@ func watchTemplateDir(dir string) {
 							templateMutex.Lock()
 							templateMap[key] = event.Name
 							templateMutex.Unlock()
-							logger.Info(fmt.Sprintf("🆕 模板更新: %s → %s", key, event.Name))
+							logger.Info("🆕 模板更新", zap.String("key", key), zap.String("path", event.Name))
 						}
 					}
 				}
@@ -96,12 +110,12 @@ func watchTemplateDir(dir string) {
 							templateMutex.Lock()
 							delete(templateMap, key)
 							templateMutex.Unlock()
-							logger.Info(fmt.Sprintf("🗑️ 模板移除: %s → %s", key, event.Name))
+							logger.Info("🗑️ 模板移除", zap.String("key", key), zap.String("path", event.Name))
 						}
 					}
 				}
 			case err = <-watcher.Errors:
-				logger.Error(fmt.Sprintf("❌ 监听器错误: %v", err))
+				logger.Error("❌ 监听器错误", zap.Error(err))
 			}
 		}
 	}()
@@ -132,7 +146,7 @@ func loadTemplates(dir string) error {
 		}
 	}
 	for k, v := range templateMap {
-		logger.Info(fmt.Sprintf("✅ 支持的模板: %s → %s", k, v))
+		logger.Info("✅ 支持的模板", zap.String("key", k), zap.String("path", v))
 	}
 	return nil
 }
