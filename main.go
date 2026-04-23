@@ -89,15 +89,18 @@ var (
 	templateMutex      sync.RWMutex
 	logger             *zap.Logger
 	logLevel           = zap.NewAtomicLevelAt(parseLogLevel(viper.GetString("logging.level")))
-	globalAuthToken    uatomic.String
-	globalBrowserPath  uatomic.String
-	renderTimeout      uatomic.Int64
-	renderQuality     uatomic.Int32
-	globalAllocCtx    context.Context
-	globalAllocCancel  context.CancelFunc
-	concurrentMutex   sync.Mutex
-	currentConcurrent int32
-	maxConcurrent     int32 // 最大并发数，可动态调整
+	globalAuthToken       uatomic.String
+	globalBrowserPath     uatomic.String
+	renderTimeout         uatomic.Int64
+	renderQuality        uatomic.Int32
+	captureViewportWidth  uatomic.Int64
+	captureViewportHeight uatomic.Int64
+	captureViewportScale  uatomic.Float64
+	globalAllocCtx       context.Context
+	globalAllocCancel    context.CancelFunc
+	concurrentMutex     sync.Mutex
+	currentConcurrent   int32
+	maxConcurrent       int32 // 最大并发数，可动态调整
 )
 
 // ====== 主程序 ======
@@ -145,6 +148,7 @@ func main() {
 		c.JSON(http.StatusMethodNotAllowed, errResp("method not allowed"))
 	})
 	r.POST(viper.GetString("server.endpoint"), RenderHandler)
+	r.POST(viper.GetString("capture.endpoint"), CaptureHandler)
 	err = r.Run(host + ":" + port)
 	if err != nil {
 		logger.Fatal("❌ 服务器启动失败", zap.Error(err))

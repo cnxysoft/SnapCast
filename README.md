@@ -17,6 +17,8 @@
 - **Bearer Token 认证**：支持 `Authorization: Bearer <token>` 格式
 - **IP 限流**：滑动窗口算法，支持网段共享限额
 - **并发控制**：可配置最大并发渲染数，支持热重载
+- **URL 直投截图**：通过 `/capture` 端点直接访问任意 URL 截图
+- **SSRF 防护**：阻止访问内网 IP、危险协议
 
 ## 快速开始
 
@@ -71,6 +73,61 @@ curl -X POST http://127.0.0.1:8080/render \
 | `data` | 否 | 模板渲染数据 |
 | `timeout` | 否 | 超时时间，支持数字(毫秒)、"10s"、"5000ms" |
 | `user_agent` | 否 | 自定义 User-Agent（JSON 模式生效） |
+
+## URL 直投截图
+
+通过 `/capture` 端点直接访问任意 URL 截图，无需准备模板：
+
+```bash
+curl -X POST http://127.0.0.1:8080/capture \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://www.baidu.com",
+    "options": {
+      "timeout": 10000,
+      "viewport": {"width": 1920, "height": 1080, "scale": 2.0},
+      "full_page": true
+    }
+  }'
+```
+
+返回 PNG 格式的图片。
+
+### 请求格式
+
+```json
+{
+  "url": "https://example.com",
+  "options": {
+    "timeout": 10000,
+    "user_agent": "Mozilla/5.0 ...",
+    "viewport": {
+      "width": 1920,
+      "height": 1080,
+      "scale": 1.0
+    },
+    "full_page": true
+  }
+}
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `url` | 是 | 目标 URL，仅支持 http/https |
+| `options.timeout` | 否 | 超时时间，默认 10000ms |
+| `options.user_agent` | 否 | 自定义 User-Agent |
+| `options.viewport.width` | 否 | 视口宽度，默认 1920 |
+| `options.viewport.height` | 否 | 视口高度，默认 1080 |
+| `options.viewport.scale` | 否 | 设备像素比，默认 1.0（2.0 为高清） |
+| `options.full_page` | 否 | 全页截图，默认 true |
+
+### SSRF 防护
+
+自动阻止以下请求：
+- 内网 IP（10.x.x.x、172.16-31.x.x、192.168.x.x、127.x.x.x）
+- 保留地址（169.254.x.x、0.0.0.0）
+- 危险协议（file://、ftp://、gopher:// 等）
+- 解析为内网 IP 的域名
 
 ## 输出模式
 
@@ -201,9 +258,9 @@ ip_filter:
 
 rate_limit:
   enabled: false  # 是否启用 IP 限流
-  window: "1s"   # 时间窗口: "1s", "1m"
+  window: "1s"    # 时间窗口: "1s", "1m"
   max_requests: 60
-  mask: 24       # IP 掩码位数，24=/24 网段共享限额
+  mask: 24        # IP 掩码位数，24=/24 网段共享限额
 
 template:
   dir: "./templates"
@@ -213,6 +270,13 @@ render:
   browser_path: ""  # 留空则自动检测 Chrome/Edge
   timeout: 10000    # 支持数字(毫秒)、"10s"、"10000ms"
   quality: 100
+
+capture:
+  endpoint: "/capture" # 截图端点路径
+  viewport:
+    width: 1920        # 默认视口宽度
+    height: 1080       # 默认视口高度
+    scale: 1.0         # 默认设备像素比
 
 logging:
   level: "info"  # debug, info, warn, error
@@ -266,6 +330,7 @@ SnapCast/
 ├── template_ext.go   # 模板函数扩展
 ├── ip.go             # IP 黑白名单过滤
 ├── ratelimit.go      # IP 限流
+├── capture.go        # URL 直投截图
 ├── logger.go         # 日志初始化
 ├── snapcast.yaml     # 配置文件（自动生成）
 └── templates/        # HTML 模板目录

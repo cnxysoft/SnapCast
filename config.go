@@ -34,6 +34,7 @@ func logActiveConfig() {
 	logger.Debug("   rate_limit", zap.Bool("enabled", viper.GetBool("rate_limit.enabled")), zap.String("window", viper.GetString("rate_limit.window")), zap.Int("max_requests", viper.GetInt("rate_limit.max_requests")), zap.Int("mask", viper.GetInt("rate_limit.mask")))
 	logger.Debug("   template", zap.String("dir", viper.GetString("template.dir")), zap.Bool("watch", viper.GetBool("template.watch")))
 	logger.Debug("   render", zap.String("browser_path", viper.GetString("render.browser_path")), zap.Any("timeout", viper.Get("render.timeout")), zap.Int("quality", viper.GetInt("render.quality")))
+	logger.Debug("   capture", zap.String("endpoint", viper.GetString("capture.endpoint")), zap.Int64("viewport_width", viper.GetInt64("capture.viewport.width")), zap.Int64("viewport_height", viper.GetInt64("capture.viewport.height")), zap.Float64("viewport_scale", viper.GetFloat64("capture.viewport.scale")))
 	logger.Debug("   logging", zap.String("level", viper.GetString("logging.level")))
 }
 
@@ -70,6 +71,13 @@ render:
   browser_path: ""      # 浏览器路径，为空则自动检测
   timeout: 10000        # 渲染超时，支持数字(毫秒)、"10s"、"10000ms"
   quality: 100          # 图片质量 0-100
+
+capture:
+  endpoint: "/capture"  # 截图接口路径
+  viewport:
+    width: 1920         # 默认视口宽度
+    height: 1080        # 默认视口高度
+    scale: 1.0          # 默认设备像素比
 
 logging:
   level: "info"         # 日志级别: debug, info, warn, error
@@ -151,6 +159,26 @@ func ApplyDynamicConfig() {
 		newTimeout = 10000 * time.Millisecond
 	}
 	renderTimeout.Store(newTimeout.Milliseconds())
+
+	// capture viewport 配置（带兜底）
+	width := int64(viper.GetInt("capture.viewport.width"))
+	if width <= 0 {
+		width = 1920
+		logger.Warn("❗ capture.viewport.width 无效，使用默认值 1920", zap.Int64("value", width))
+	}
+	height := int64(viper.GetInt("capture.viewport.height"))
+	if height <= 0 {
+		height = 1080
+		logger.Warn("❗ capture.viewport.height 无效，使用默认值 1080", zap.Int64("value", height))
+	}
+	scale := viper.GetFloat64("capture.viewport.scale")
+	if scale <= 0 {
+		scale = 1.0
+		logger.Warn("❗ capture.viewport.scale 无效，使用默认值 1.0", zap.Float64("value", scale))
+	}
+	captureViewportWidth.Store(width)
+	captureViewportHeight.Store(height)
+	captureViewportScale.Store(scale)
 }
 
 func parseLogLevel(level string) zapcore.Level {
@@ -167,4 +195,3 @@ func parseLogLevel(level string) zapcore.Level {
 		return zapcore.InfoLevel
 	}
 }
-
